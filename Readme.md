@@ -95,7 +95,7 @@ cd frontend
 npm install
 
 # Start the Vite development server
-npm vite
+npx vite
 ```
 *The frontend interface will be available at `http://localhost:5173`.*
 
