@@ -53,7 +53,7 @@ Taking raw JSON OCR data and making it a readable eBook requires fixing human-re
 
 ## 🚀 Prerequisites
 
-* Python 3.9+
+* Python 3.10+
 * API Keys:
   * **DeepInfra API Key** (for OLMOCR)
   * **MinerU / OpenXLab Token** (for structural extraction)
