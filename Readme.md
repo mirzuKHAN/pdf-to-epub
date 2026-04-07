@@ -98,7 +98,6 @@ npm install
 npm vite
 ```
 *The frontend interface will be available at `http://localhost:5173`.*
-```
 
 ### API Endpoints
 * `POST /convert/full`: Runs the full MinerU + OLMOCR + Merge pipeline.
