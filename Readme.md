@@ -62,7 +62,7 @@ Taking raw JSON OCR data and making it a readable eBook requires fixing human-re
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/mirzuKHAN/pdf-to-epub-fyp.git
+   git clone https://github.com/mirzuKHAN/pdf-to-epub.git
    cd pdf-to-epub-fyp
    ```
 
