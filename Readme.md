@@ -63,12 +63,12 @@ Taking raw JSON OCR data and making it a readable eBook requires fixing human-re
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/mirzuKHAN/pdf-to-epub.git
-   cd pdf-to-epub-fyp
+   cd pdf-to-epub
    ```
 
 2. **Install the dependencies:**
    ```bash
-   pip install fastapi uvicorn aiohttp PyMuPDF python-dotenv json_repair pypdf rich requests rapidfuzz latex2mathml ebooklib python-multipart
+   pip install -r requirements.txt
    ```
 
 3. **Set up Environment Variables:**
