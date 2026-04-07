@@ -91,8 +91,14 @@ def load_olmocr_pages(filepath):
     with open(filepath, "r", encoding="utf-8") as f:
         file_content = json.load(f)
         for page_item in file_content:
-            # Handle new format where contents are nested under "data"
-            data = page_item.get("data", {})
+            if not isinstance(page_item, dict):
+                continue
+
+            # Automatically adapt to both nested ("data") and flat JSON formats
+            if "data" in page_item and isinstance(page_item["data"], dict):
+                data = page_item["data"]
+            else:
+                data = page_item
 
             txt = data.get("natural_text", "") or ""
             lang = data.get("primary_language", "en")
@@ -199,6 +205,9 @@ def find_best_olmocr_block(miner_text, olm_blocks, b_type):
 
 
 def process_block(block, olm_blocks, all_matched_texts):
+    if not isinstance(block, dict):
+        return None, False, ""
+
     b_type = block.get("type")
     b_content = block.get("content", {})
     sort_idx = None
@@ -207,7 +216,14 @@ def process_block(block, olm_blocks, all_matched_texts):
 
     def attempt_match(content_key, preserve_captions=False):
         nonlocal has_non_text_elements, text_preview
-        raw_list = b_content.get(content_key, [])
+
+        if isinstance(b_content, dict):
+            raw_list = b_content.get(content_key, [])
+        elif isinstance(b_content, list):
+            raw_list = b_content
+        else:
+            raw_list = []
+
         combined_text, has_non_text = extract_pure_text(raw_list)
         has_non_text_elements = has_non_text
         if not text_preview: text_preview = combined_text[:40].replace('\n', ' ')
@@ -221,7 +237,12 @@ def process_block(block, olm_blocks, all_matched_texts):
                 extracted_text = preserve_prefix(combined_text, extracted_text)
 
             all_matched_texts.append(extracted_text)
-            b_content[content_key] = parse_olmocr_to_nodes(extracted_text)
+
+            if isinstance(b_content, dict):
+                b_content[content_key] = parse_olmocr_to_nodes(extracted_text)
+            elif isinstance(b_content, list):
+                block["content"] = parse_olmocr_to_nodes(extracted_text)
+
             return idx
         return None
 
@@ -232,18 +253,20 @@ def process_block(block, olm_blocks, all_matched_texts):
     elif b_type in ["page_header", "page_footer", "page_footnote"]:
         sort_idx = attempt_match(f"{b_type}_content")
     elif b_type == "list":
-        for li in b_content.get("list_items", []):
-            c_text, hnt = extract_pure_text(li.get("item_content", []))
-            if hnt: has_non_text_elements = True
-            if not text_preview: text_preview = c_text[:40]
+        if isinstance(b_content, dict):
+            for li in b_content.get("list_items", []):
+                if not isinstance(li, dict): continue
+                c_text, hnt = extract_pure_text(li.get("item_content", []))
+                if hnt: has_non_text_elements = True
+                if not text_preview: text_preview = c_text[:40]
 
-            idx = find_best_olmocr_block(c_text, olm_blocks, b_type)
-            if idx is not None:
-                olm_blocks[idx]["used"] = True
-                ext_text = olm_blocks[idx]["text"]
-                all_matched_texts.append(ext_text)
-                li["item_content"] = parse_olmocr_to_nodes(ext_text)
-                if sort_idx is None: sort_idx = idx
+                idx = find_best_olmocr_block(c_text, olm_blocks, b_type)
+                if idx is not None:
+                    olm_blocks[idx]["used"] = True
+                    ext_text = olm_blocks[idx]["text"]
+                    all_matched_texts.append(ext_text)
+                    li["item_content"] = parse_olmocr_to_nodes(ext_text)
+                    if sort_idx is None: sort_idx = idx
 
     elif b_type == "image":
         has_non_text_elements = True
@@ -257,13 +280,15 @@ def process_block(block, olm_blocks, all_matched_texts):
             if sort_idx + 1 < len(olm_blocks) and not olm_blocks[sort_idx + 1]["used"]:
                 next_block_text = olm_blocks[sort_idx + 1]["text"]
                 if next_block_text.lower().startswith("<table"):
-                    b_content["html"] = next_block_text
+                    if isinstance(b_content, dict):
+                        b_content["html"] = next_block_text
                     olm_blocks[sort_idx + 1]["used"] = True
         else:
             # If the table has no caption (or match failed), aggressively hunt for the HTML block
             for i, ob in enumerate(olm_blocks):
                 if not ob["used"] and ob["text"].lower().startswith("<table"):
-                    b_content["html"] = ob["text"]
+                    if isinstance(b_content, dict):
+                        b_content["html"] = ob["text"]
                     ob["used"] = True
                     sort_idx = i
                     break
@@ -364,12 +389,18 @@ def is_mineru_gibberish(miner_blocks, olm_text):
     """
     miner_texts = []
     for b in miner_blocks:
+        if not isinstance(b, dict): continue
         # Only evaluate actual text blocks (ignore tables, images, equations)
         if b.get("type") in ["paragraph", "title", "list", "page_header", "page_footer", "page_footnote"]:
-            for val in b.get("content", {}).values():
-                if isinstance(val, list):
-                    t, _ = extract_pure_text(val)
-                    if t: miner_texts.append(t)
+            content_val = b.get("content", {})
+            if isinstance(content_val, dict):
+                for val in content_val.values():
+                    if isinstance(val, list):
+                        t, _ = extract_pure_text(val)
+                        if t: miner_texts.append(t)
+            elif isinstance(content_val, list):
+                t, _ = extract_pure_text(content_val)
+                if t: miner_texts.append(t)
 
     miner_full = " ".join(miner_texts)
 
@@ -399,6 +430,7 @@ def process_gibberish_page(miner_blocks, olm_blocks):
     # 1. Isolate text blocks from layout blocks
     text_miner_blocks = []
     for mb in miner_blocks:
+        if not isinstance(mb, dict): continue
         b_type = mb.get("type")
         if b_type in ["paragraph", "title", "list", "page_header", "page_footer", "page_footnote"]:
             text_miner_blocks.append(mb)
@@ -434,7 +466,11 @@ def process_gibberish_page(miner_blocks, olm_blocks):
 
             olm_mapped[closest_idx]["type"] = b_type
             if b_type == "title":
-                olm_mapped[closest_idx]["level"] = mb.get("content", {}).get("level", 1)
+                content_val = mb.get("content", {})
+                level = 1
+                if isinstance(content_val, dict):
+                    level = content_val.get("level", 1)
+                olm_mapped[closest_idx]["level"] = level
 
     for om in olm_mapped:
         # Exclude leftover HTML tables from becoming text blocks
@@ -457,15 +493,17 @@ def process_gibberish_page(miner_blocks, olm_blocks):
     # 3. Inject MinerU Media (Images, Tables, Equations) accurately into the text flow
     text_blocks_seen = 0
     for mb in miner_blocks:
+        if not isinstance(mb, dict): continue
         b_type = mb.get("type")
         if b_type in ["paragraph", "title", "list", "page_header", "page_footer", "page_footnote"]:
             text_blocks_seen += 1
         elif b_type in ["image", "table", "equation"]:
             # Wipe gibberish captions
-            if "image_caption" in mb.get("content", {}):
-                mb["content"]["image_caption"] = []
-            if "table_caption" in mb.get("content", {}):
-                mb["content"]["table_caption"] = []
+            if isinstance(mb.get("content"), dict):
+                if "image_caption" in mb["content"]:
+                    mb["content"]["image_caption"] = []
+                if "table_caption" in mb["content"]:
+                    mb["content"]["table_caption"] = []
 
             # Place the media immediately after the text block it followed in MinerU
             media_rel_pos = text_blocks_seen / num_miner_texts
@@ -517,14 +555,23 @@ def run_merge(mineru_input=DEFAULT_MINERU_INPUT, olmocr_input=DEFAULT_OLMOCR_INP
             print("[MINERU FALLBACK] OLMOCR has no usable non-Arabic text. Relying entirely on MinerU.")
             kept_blocks = []
             for block in page_blocks:
+                if not isinstance(block, dict):
+                    kept_blocks.append(block)
+                    continue
+
                 b_type = block.get("type")
                 ext = ""
-                for vals in block.get("content", {}).values():
-                    if isinstance(vals, list):
-                        ext += "".join(
-                            n.get("content", "") for n in vals if isinstance(n, dict) and n.get("type") == "text")
-                    elif isinstance(vals, str):
-                        ext += vals
+                content_val = block.get("content", {})
+                if isinstance(content_val, dict):
+                    for vals in content_val.values():
+                        if isinstance(vals, list):
+                            ext += "".join(
+                                n.get("content", "") for n in vals if isinstance(n, dict) and n.get("type") == "text")
+                        elif isinstance(vals, str):
+                            ext += vals
+                elif isinstance(content_val, list):
+                    ext += "".join(
+                        n.get("content", "") for n in content_val if isinstance(n, dict) and n.get("type") == "text")
 
                 if b_type in ["paragraph", "title", "list", "page_header", "page_footer", "page_footnote"]:
                     if is_mostly_arabic(ext):
@@ -562,12 +609,17 @@ def run_merge(mineru_input=DEFAULT_MINERU_INPUT, olmocr_input=DEFAULT_OLMOCR_INP
             if sort_idx is not None:
                 # SAFE EXTRACT FOR LOGS - Fixes the IndexError!
                 ext = ""
-                for vals in block.get("content", {}).values():
-                    if isinstance(vals, list):
-                        ext += "".join(
-                            n.get("content", "") for n in vals if isinstance(n, dict) and n.get("type") == "text")
-                    elif isinstance(vals, str):
-                        ext += vals
+                content_val = block.get("content", {})
+                if isinstance(content_val, dict):
+                    for vals in content_val.values():
+                        if isinstance(vals, list):
+                            ext += "".join(
+                                n.get("content", "") for n in vals if isinstance(n, dict) and n.get("type") == "text")
+                        elif isinstance(vals, str):
+                            ext += vals
+                elif isinstance(content_val, list):
+                    ext += "".join(
+                        n.get("content", "") for n in content_val if isinstance(n, dict) and n.get("type") == "text")
 
                 # Rule 1: Drop if mostly Arabic
                 keep_block = not is_mostly_arabic(ext)
@@ -600,11 +652,16 @@ def run_merge(mineru_input=DEFAULT_MINERU_INPUT, olmocr_input=DEFAULT_OLMOCR_INP
 
         # PASS 1: High Priority (Titles, Tables, Images, Footnotes)
         for orig_idx, block in enumerate(page_blocks):
+            if not isinstance(block, dict):
+                blocks_meta[orig_idx] = {"block": block, "sort_idx": None, "orig_idx": orig_idx, "type": "unknown",
+                                         "keep": True}
+                continue
             if block.get("type") != "paragraph":
                 process_and_log(orig_idx, block)
 
         # PASS 2: Low Priority (Paragraphs)
         for orig_idx, block in enumerate(page_blocks):
+            if not isinstance(block, dict): continue
             if block.get("type") == "paragraph":
                 process_and_log(orig_idx, block)
 
