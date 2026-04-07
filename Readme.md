@@ -86,6 +86,20 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 *The API documentation (Swagger UI) will be available at `http://localhost:8000/docs`.*
 
+### 2. Starting the Frontend (Vite)
+Open a **second** terminal window and navigate to the frontend folder:
+```bash
+cd frontend
+
+# Install Node modules
+npm install
+
+# Start the Vite development server
+npm vite
+```
+*The frontend interface will be available at `http://localhost:5173`.*
+```
+
 ### API Endpoints
 * `POST /convert/full`: Runs the full MinerU + OLMOCR + Merge pipeline.
 * `POST /convert/mineru-only`: Bypasses OLMOCR and uses only MinerU (Faster, suitable for simple, text-heavy PDFs).
