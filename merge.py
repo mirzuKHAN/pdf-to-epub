@@ -43,14 +43,15 @@ def clean_for_gibberish_check(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
-def replace_footnotes_with_numbers(text):
+def replace_footnotes_with_numbers(text, start_counter=1):
     """
     Safely finds \footnote{...} in text, handling nested braces,
-    and replaces them with sequential numbers (1, 2, 3...) per page.
+    and replaces them with sequential numbers. Returns the updated text
+    and the new counter so it can be maintained across pages.
     """
     result = []
     i = 0
-    counter = 1
+    counter = start_counter
 
     while i < len(text):
         idx = text.find(r'\footnote{', i)
@@ -81,20 +82,23 @@ def replace_footnotes_with_numbers(text):
             result.append(text[idx:])
             break
 
-    return "".join(result)
+    return "".join(result), counter
 
 
 def load_olmocr_pages(filepath):
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Could not find OLMOCR file at: '{filepath}'")
     pages_data = []
+
+    # Initialize the footnote counter before looping through the pages
+    global_footnote_counter = 1
+
     with open(filepath, "r", encoding="utf-8") as f:
         file_content = json.load(f)
         for page_item in file_content:
             if not isinstance(page_item, dict):
                 continue
 
-            # Automatically adapt to both nested ("data") and flat JSON formats
             if "data" in page_item and isinstance(page_item["data"], dict):
                 data = page_item["data"]
             else:
@@ -103,8 +107,13 @@ def load_olmocr_pages(filepath):
             txt = data.get("natural_text", "") or ""
             lang = data.get("primary_language", "en")
 
-            # Eradicate OLMOCR markdown image tags completely
+            txt = txt.replace('\x0c', '')
+
+            # Update the text AND the running counter
+            txt, global_footnote_counter = replace_footnotes_with_numbers(txt, global_footnote_counter)
+
             txt = re.sub(r'!\[.*?\]\(.*?\.png\)', '', txt)
+
             pages_data.append({
                 "text": txt.strip(),
                 "lang": lang
@@ -128,11 +137,12 @@ def extract_pure_text(content_list):
 
 def parse_olmocr_to_nodes(text):
     r"""
-    Finds LaTeX inline equations \( ... \) or $$ ... $$ in OLMOCR text
-    and splits them back into MinerU-style nodes.
+    Finds LaTeX inline equations \( ... \), $$ ... $$, and block equations \[ ... \]
+    in OLMOCR text and splits them back into MinerU-style nodes.
     """
-    pattern = r'(\\\(.*?\\\)|\$\$.*?\$\$)'
-    parts = re.split(pattern, text)
+    # Match \(...\) OR $$...$$ OR \[...\]
+    pattern = r'(\\\(.*?\\\)|\$\$.*?\$\$|\\\[.*?\\\])'
+    parts = re.split(pattern, text, flags=re.DOTALL)
 
     nodes = []
     for i, part in enumerate(parts):
@@ -140,10 +150,16 @@ def parse_olmocr_to_nodes(text):
         if i % 2 == 0:
             nodes.append({"type": "text", "content": part})
         else:
-            eq_content = part.replace('\\(', '').replace('\\)', '').replace('$$', '').strip()
-            nodes.append({"type": "equation_inline", "content": eq_content})
-    return nodes
+            # Handle block equations \[ ... \]
+            if part.startswith('\\['):
+                eq_content = part[2:-2].strip()
+                nodes.append({"type": "equation_isolated", "content": eq_content})
+            # Handle inline equations \( ... \) and $$ ... $$
+            else:
+                eq_content = part.replace('\\(', '').replace('\\)', '').replace('$$', '').strip()
+                nodes.append({"type": "equation_inline", "content": eq_content})
 
+    return nodes
 
 def preserve_prefix(miner_text, olm_text):
     """
@@ -178,20 +194,32 @@ def find_best_olmocr_block(miner_text, olm_blocks, b_type):
     best_score = 0
     best_idx = -1
     miner_lower = miner_text.lower()
+    miner_len = len(miner_text)
 
     for i, block in enumerate(olm_blocks):
         if block["used"]: continue
         t_raw = block["text"]
         t_compare = re.sub(r'(?:\\+footnote|\x0cootnote)\{[^}]+\}', '', t_raw)
+        t_compare_len = len(t_compare)
 
-        # Anti-Greed Safety Net: Prevent structural tags from swallowing massive paragraphs
-        if b_type in ["title", "page_footnote", "page_header", "page_footer"]:
-            if len(t_compare) > max(100, len(miner_text) * 3):
+        # Anti-Hijack Rule 1: Prevent structural tags (or short captions) from swallowing massive paragraphs
+        if b_type in ["title", "page_footnote", "page_header", "page_footer", "image", "table"]:
+            if miner_len < 30 and t_compare_len > miner_len * 3:
+                continue
+            if t_compare_len > max(150, miner_len * 4):
                 continue
 
+        # Anti-Hijack Rule 2: Prevent tiny OLMOCR fragments from destroying massive MinerU paragraphs
+        if t_compare_len < 15 and miner_len > t_compare_len * 3:
+            continue
+
         t_lower = t_compare.lower()
-        if len(miner_text) < len(t_compare) * 0.7:
+
+        # Dual-directional partial ratio:
+        if miner_len < t_compare_len * 0.8:
             score = fuzz.partial_ratio(miner_lower, t_lower)
+        elif t_compare_len < miner_len * 0.8:
+            score = fuzz.partial_ratio(t_lower, miner_lower)
         else:
             score = fuzz.ratio(miner_lower, t_lower)
 
@@ -299,15 +327,16 @@ def process_block(block, olm_blocks, all_matched_texts):
 def get_olmocr_blocks(page_text):
     blocks = []
 
-    # 1. Isolate HTML tables so they don't get destroyed by the newline splitter
-    parts = re.split(r'(<table.*?</table>)', page_text, flags=re.DOTALL | re.IGNORECASE)
+    # 1. Isolate HTML tables AND LaTeX Block Equations (\[ ... \])
+    # so they don't get destroyed by the newline splitter
+    parts = re.split(r'(<table.*?</table>|\\\[.*?\\\])', page_text, flags=re.DOTALL | re.IGNORECASE)
 
     for part in parts:
         part = part.strip()
         if not part: continue
 
-        # If this part is a protected HTML table, add it directly as an unbroken block
-        if part.lower().startswith("<table"):
+        # If this part is a protected HTML table or block equation, add it directly as an unbroken block
+        if part.lower().startswith("<table") or part.startswith("\\["):
             blocks.append({"text": part, "used": False})
         else:
             # For all standard text, split safely by newlines
@@ -490,14 +519,14 @@ def process_gibberish_page(miner_blocks, olm_blocks):
             }
         })
 
-    # 3. Inject MinerU Media (Images, Tables, Equations) accurately into the text flow
+    # 3. Inject MinerU Media (Images, Footnotes) accurately into the text flow
     text_blocks_seen = 0
     for mb in miner_blocks:
         if not isinstance(mb, dict): continue
         b_type = mb.get("type")
         if b_type in ["paragraph", "title", "list", "page_header", "page_footer", "page_footnote"]:
             text_blocks_seen += 1
-        elif b_type in ["image", "table", "equation"]:
+        elif b_type in ["image", "page_footnote"]:
             # Wipe gibberish captions
             if isinstance(mb.get("content"), dict):
                 if "image_caption" in mb["content"]:
@@ -606,6 +635,14 @@ def run_merge(mineru_input=DEFAULT_MINERU_INPUT, olmocr_input=DEFAULT_OLMOCR_INP
             sort_idx, has_non_text, text_preview = process_block(block, olm_blocks, all_matched_texts)
             b_type = block.get("type")
 
+            # OVERRIDE: Forcibly pin images to MinerU's layout.
+            # (Their captions are already updated by process_block, but we ignore OLMOCR's sequence index)
+            if b_type == "image":
+                print(f"[IMAGE - PINNED TO MINERU] Caption matched: {sort_idx is not None}")
+                blocks_meta[orig_idx] = {"block": block, "sort_idx": None, "orig_idx": orig_idx, "type": b_type,
+                                         "keep": True}
+                return
+
             if sort_idx is not None:
                 # SAFE EXTRACT FOR LOGS - Fixes the IndexError!
                 ext = ""
@@ -631,24 +668,18 @@ def run_merge(mineru_input=DEFAULT_MINERU_INPUT, olmocr_input=DEFAULT_OLMOCR_INP
                 blocks_meta[orig_idx] = {"block": block, "sort_idx": sort_idx, "orig_idx": orig_idx, "type": b_type,
                                          "keep": keep_block}
             else:
-                # Rule 2: Keep unmatched pure text paragraphs
-                if b_type == "paragraph" and not has_non_text:
-                    keep_unmatched = True
-                else:
-                    keep_unmatched = has_non_text or b_type in ["image", "footnote", "page_footnote", "table",
-                                                                "equation"]
+                # Rule 2: STRICT DROP - If OLMOCR dropped it, MinerU drops it
+                # UNLESS it is an image or footnote.
+                keep_unmatched = b_type in ["image", "footnote", "page_footnote"]
 
-                # Rule 1: Apply Arabic drop check to unmatched retained text
-                if keep_unmatched and is_mostly_arabic(text_preview):
-                    keep_unmatched = False
-                    print(f"[DROPPED ARABIC UNMATCHED] {b_type.upper()}: '{text_preview[:40]}...'")
-                elif keep_unmatched:
-                    print(f"[UNMATCHED - RETAINED] {b_type.upper()}: '{text_preview[:40]}...'")
+                if keep_unmatched:
+                    print(f"[UNMATCHED - RETAINED MEDIA] {b_type.upper()}")
                 else:
-                    print(f"[UNMATCHED - DROPPED] {b_type.upper()}: '{text_preview[:40]}...'")
+                    print(f"[UNMATCHED - DROPPED (OLMOCR Dominance)] {b_type.upper()}: '{text_preview[:40]}...'")
 
                 blocks_meta[orig_idx] = {"block": block, "sort_idx": None, "orig_idx": orig_idx, "type": b_type,
                                          "keep": keep_unmatched}
+
 
         # PASS 1: High Priority (Titles, Tables, Images, Footnotes)
         for orig_idx, block in enumerate(page_blocks):
@@ -667,31 +698,16 @@ def run_merge(mineru_input=DEFAULT_MINERU_INPUT, olmocr_input=DEFAULT_OLMOCR_INP
 
         kept_meta = [m for m in blocks_meta if m is not None and m["keep"]]
 
-        # Interpolation Logic
+        # Interpolation Logic: Pin images strictly to the text that preceded them in MinerU
+        last_valid_sort_idx = -1
         for i in range(len(kept_meta)):
-            if kept_meta[i]["sort_idx"] is None:
-                prev_val = next(
-                    (kept_meta[j]["sort_idx"] for j in range(i - 1, -1, -1) if kept_meta[j]["sort_idx"] is not None),
-                    None)
-
-                next_val = None
-                next_idx = None
-                for j in range(i + 1, len(kept_meta)):
-                    if kept_meta[j]["sort_idx"] is not None:
-                        next_val = kept_meta[j]["sort_idx"]
-                        next_idx = j
-                        break
-
-                if prev_val is not None and next_val is not None:
-                    gap = next_idx - i
-                    step = (next_val - prev_val) / (gap + 1)
-                    kept_meta[i]["sort_idx"] = prev_val + step
-                elif prev_val is not None:
-                    kept_meta[i]["sort_idx"] = prev_val + 0.1
-                elif next_val is not None:
-                    kept_meta[i]["sort_idx"] = next_val - 0.1
-                else:
-                    kept_meta[i]["sort_idx"] = 0
+            if kept_meta[i]["sort_idx"] is not None:
+                last_valid_sort_idx = kept_meta[i]["sort_idx"]
+            else:
+                # It's an image or unmatched media. Pin it right after the last matched text.
+                # We add 0.001 so consecutive images (a, b, c) stay in perfect top-to-bottom order.
+                last_valid_sort_idx += 0.001
+                kept_meta[i]["sort_idx"] = last_valid_sort_idx
 
         injected_blocks = extract_leftover_olmocr_blocks(olm_blocks, all_matched_texts)
         for inj in injected_blocks:

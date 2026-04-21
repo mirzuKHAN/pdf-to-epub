@@ -5,6 +5,27 @@ from ebooklib import epub
 from rapidfuzz import fuzz
 
 
+def replace_math_in_text(text):
+    """Scans raw text/HTML for LaTeX math markers and converts them to MathML."""
+    if not text:
+        return ""
+
+    def math_replacer(match):
+        # Pass the entire matched string (including markers) to the converter
+        return convert_to_mathml(match.group(0))
+
+    # Replace \( ... \)
+    text = re.sub(r'\\\((.*?)\\\)', math_replacer, text, flags=re.DOTALL)
+    # Replace \[ ... \]
+    text = re.sub(r'\\\[(.*?)\\\]', math_replacer, text, flags=re.DOTALL)
+    # Replace $$ ... $$
+    text = re.sub(r'\$\$(.*?)\$\$', math_replacer, text, flags=re.DOTALL)
+    # Replace $ ... $ (Uses negative lookbehind to avoid matching currency like $50)
+    text = re.sub(r'(?<!\$)\$([^$\n]+)\$(?!\$)', math_replacer, text)
+
+    return text
+
+
 def convert_to_mathml(latex_str):
     """Converts LaTeX math to native EPUB3 MathML."""
     if not latex_str:
@@ -18,6 +39,11 @@ def convert_to_mathml(latex_str):
             latex_str = latex_str[2:-2].strip()
         elif latex_str.startswith('$') and latex_str.endswith('$'):
             latex_str = latex_str[1:-1].strip()
+        # Add support for escaping parenthesis and bracket wrappers
+        elif latex_str.startswith('\\(') and latex_str.endswith('\\)'):
+            latex_str = latex_str[2:-2].strip()
+        elif latex_str.startswith('\\[') and latex_str.endswith('\\]'):
+            latex_str = latex_str[2:-2].strip()
 
         return latex2mathml.converter.convert(latex_str)
     except ImportError:
@@ -26,7 +52,6 @@ def convert_to_mathml(latex_str):
     except Exception as e:
         print(f"MathML Conversion error: {e}")
         return f" <i>{latex_str}</i> "
-
 
 def extract_text(item_list):
     """Safely extracts text, fixes OCR artifacts, and ensures MathML has breathing room."""
@@ -42,7 +67,16 @@ def extract_text(item_list):
                 text_val = item.get('content', '')
                 # Fix known OCR glitches for "not equal"
                 text_val = text_val.replace('\f=', '≠').replace('\\f=', '≠').replace('̸=', '≠')
+
+                # --- NEW: Convert stray LaTeX text formatting into HTML ---
+                text_val = re.sub(r'\\textbf{([^}]+)}', r'<b>\1</b>', text_val)
+                text_val = re.sub(r'\\textit{([^}]+)}', r'<i>\1</i>', text_val)
+
+                # Process any stray math hidden in standard text
+                text_val = replace_math_in_text(text_val)
+
                 chunks.append(('text', text_val))
+
             elif i_type == 'equation_inline':
                 latex_str = item.get('content', '')
                 mathml = convert_to_mathml(latex_str)
@@ -96,7 +130,7 @@ def is_list_item(text):
     """Regex to detect if a paragraph actually starts like a list item."""
     clean_text = re.sub(r'<[^>]+>', '', text).strip()
     # Matches digits, bullets, asterisks, hyphens, en-dashes, em-dashes and Cyrillic letters
-    pattern = r'^\s*(?:\d+[\.\)]?|[a-zA-Zа-яА-ЯёЁ][\.\)]|[\-\•\*—–])\s+'
+    pattern = r'^\s*(?:\d+[\.\)]|[a-zA-Zа-яА-ЯёЁ][\.\)]|[\-\•\*—–])\s+'
     return bool(re.match(pattern, clean_text))
 
 
@@ -350,8 +384,16 @@ def create_epub_from_mineru(json_path, output_epub, base_dir_img, skip_pages=Non
                     active_list[-1] = merge_text(active_list[-1], text)
                     continue
 
+                # NEW LOGIC: Check if it looks like a brand new paragraph
+                clean_prev = re.sub(r'<[^>]+>', '', active_list[-1]).strip()
+                clean_curr = re.sub(r'<[^>]+>', '', text).strip()
+                ends_with_terminator = clean_prev.endswith(('.', '?', '!', '”', '"'))
+                starts_with_capital = clean_curr and clean_curr[0].isupper()
+
                 is_indented = current_x0 > (standard_x0 + 15)
-                if is_indented:
+
+                # Only swallow if it's indented AND it doesn't look like a completely new sentence
+                if is_indented and not (ends_with_terminator and starts_with_capital):
                     active_list[-1] = active_list[-1].strip() + "<br/><br/>" + text.strip()
                     continue
 
@@ -418,9 +460,13 @@ def create_epub_from_mineru(json_path, output_epub, base_dir_img, skip_pages=Non
 
                 html_content.append('</figure>')
 
+
         elif b_type == 'table':
             flush_text_buffers()
             table_html = content.get('html', content.get('table_body', ''))
+
+            table_html = replace_math_in_text(table_html)
+
             raw_captions = extract_text(content.get('table_caption', []))
             raw_footnotes = extract_text(content.get('table_footnote', []))
 
